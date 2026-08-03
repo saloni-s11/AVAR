@@ -6,6 +6,7 @@ import numpy as np
 
 from .face_service import generate_embedding
 from .database import users_collection
+from .fusion import confidence_fusion, authentication_status
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
@@ -70,20 +71,41 @@ async def authenticate(image: UploadFile = File(...)):
 
     latency = int((time.time() - start_time) * 1000)
 
+       # Temporary voice score
+    voice_score = 80.0
+
+    fusion_score = confidence_fusion(
+    round(max(best_score, 0) * 100, 2),
+    voice_score
+    )
+
+    status = authentication_status(fusion_score)
     THRESHOLD = 0.50
 
     if best_user is not None and best_score >= THRESHOLD:
 
-        return {
-            "authorized": True,
-            "user": best_user.get("full_name", "Unknown"),
-            "face_score": round(best_score * 100, 2),
-            "latency": latency
-        }
+      return {
+    "authorized": True,
+    "user": best_user.get("full_name", "Unknown"),
 
+    "face_score": round(best_score * 100, 2),
+    "voice_score": voice_score,
+    "fusion_score": fusion_score,
+
+    "status": status,
+
+    "latency": latency
+}
+    
     return {
-        "authorized": False,
-        "user": None,
-        "face_score": round(max(best_score, 0) * 100, 2),
-        "latency": latency
-    }
+    "authorized": False,
+    "user": None,
+
+    "face_score": round(max(best_score, 0) * 100, 2),
+    "voice_score": voice_score,
+    "fusion_score": fusion_score,
+
+    "status": status,
+
+    "latency": latency
+}
