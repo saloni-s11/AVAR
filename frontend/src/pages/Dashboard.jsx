@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useState, useEffect } from "react";
 import { Link } from "react-router-dom";
 import {
   Activity,
@@ -23,38 +23,52 @@ import { PageHeader } from "@/components/page-header";
 import { StatusBadge } from "@/components/status-badge";
 import { alerts, authTrend, logs, robots, users } from "@/lib/mock-data";
 
-const stats = [
-  {
-    label: "Authentications today",
-    value: "1,214",
-    delta: "+8.2%",
-    hint: "vs. yesterday",
-    icon: Activity,
-  },
-  {
-    label: "Success rate",
-    value: "98.6%",
-    delta: "+0.4 pp",
-    hint: "last 7 days",
-    icon: ShieldCheck,
-  },
-  {
-    label: "Enrolled users",
-    value: users.length.toString(),
-    delta: "+2",
-    hint: "this week",
-    icon: UsersIcon,
-  },
-  {
-    label: "Active robots",
-    value: `${robots.filter((r) => r.status === "online").length}/${robots.length}`,
-    delta: "1 offline",
-    hint: "fleet status",
-    icon: Bot,
-  },
-];
-
 export default function Dashboard() {
+  const [usersCount, setUsersCount] = useState(users.length);
+
+  useEffect(() => {
+    fetch("/api/users")
+      .then((res) => {
+        if (!res.ok) throw new Error("HTTP error " + res.status);
+        return res.json();
+      })
+      .then((data) => {
+        setUsersCount(data.length);
+      })
+      .catch((err) => console.error("Error fetching users count:", err));
+  }, []);
+
+  const stats = [
+    {
+      label: "Authentications today",
+      value: "1,214",
+      delta: "+8.2%",
+      hint: "vs. yesterday",
+      icon: Activity,
+    },
+    {
+      label: "Success rate",
+      value: "98.6%",
+      delta: "+0.4 pp",
+      hint: "last 7 days",
+      icon: ShieldCheck,
+    },
+    {
+      label: "Enrolled users",
+      value: usersCount.toString(),
+      delta: "+2",
+      hint: "this week",
+      icon: UsersIcon,
+    },
+    {
+      label: "Active robots",
+      value: `${robots.filter((r) => r.status === "online").length}/${robots.length}`,
+      delta: "1 offline",
+      hint: "fleet status",
+      icon: Bot,
+    },
+  ];
+
   const recentLogs = logs.slice(0, 5);
   const openAlerts = alerts.filter((a) => !a.acknowledged);
 

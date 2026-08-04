@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { Link } from "react-router-dom";
 import { Filter, Plus, Search } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -7,7 +7,6 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { PageHeader } from "@/components/page-header";
 import { StatusBadge } from "@/components/status-badge";
-import { users } from "@/lib/mock-data";
 import {
   Select,
   SelectContent,
@@ -17,7 +16,7 @@ import {
 } from "@/components/ui/select";
 
 function initials(name) {
-  return name
+  return (name || "")
     .split(" ")
     .map((n) => n[0])
     .join("")
@@ -25,14 +24,26 @@ function initials(name) {
 }
 
 export default function Users() {
+  const [users, setUsers] = useState([]);
   const [q, setQ] = useState("");
   const [role, setRole] = useState("all");
+
+  useEffect(() => {
+    fetch("/api/users")
+      .then((res) => {
+        if (!res.ok) throw new Error("HTTP error " + res.status);
+        return res.json();
+      })
+      .then((data) => setUsers(data))
+      .catch((err) => console.error("Error fetching users:", err));
+  }, []);
+
   const filtered = users.filter(
     (u) =>
       (role === "all" || u.role === role) &&
-      (u.name.toLowerCase().includes(q.toLowerCase()) ||
-        u.email.toLowerCase().includes(q.toLowerCase()) ||
-        u.department.toLowerCase().includes(q.toLowerCase())),
+      ((u.name || "").toLowerCase().includes(q.toLowerCase()) ||
+        (u.email || "").toLowerCase().includes(q.toLowerCase()) ||
+        (u.department || "").toLowerCase().includes(q.toLowerCase())),
   );
 
   return (

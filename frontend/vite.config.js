@@ -14,4 +14,16 @@ export default defineConfig({
       "@": "/src",
     },
   },
+  server: {
+    proxy: {
+      "/api/detect-face": {
+        target: "http://localhost:5002",
+        changeOrigin: true,
+      },
+      "/api": {
+        target: "http://localhost:5001",
+        changeOrigin: true,
+      },
+    },
+  },
 });

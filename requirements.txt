@@ -1,0 +1,19 @@
+# =============================================================
+#  AVAR Project – Python Dependencies
+#  Install with: pip install -r requirements.txt
+# =============================================================
+
+fastapi
+uvicorn
+ultralytics
+opencv-python
+numpy
+python-multipart
+pydantic
+
+# =============================================================
+#  Node.js dependencies are managed by npm, NOT pip.
+#
+#  Backend  → cd backend  && npm install
+#  Frontend → cd frontend && npm install
+# =============================================================
