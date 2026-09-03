@@ -15,6 +15,7 @@ import {
 } from "@/components/ui/select";
 import { PageHeader } from "@/components/page-header";
 import { StatusBadge } from "@/components/status-badge";
+import { api } from "@/lib/api";
 
 const steps = [
   { key: "profile", label: "Profile" },
@@ -38,7 +39,8 @@ export default function Enroll() {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const [stream, setStream] = useState(null);
-  const [faceImages, setFaceImages] = useState([]);
+  const [faceImages, setFaceImages] = useState([]);       // InsightFace-processed crops
+  const [faceEmbeddings, setFaceEmbeddings] = useState([]); // 512-d embeddings
   const [isScanning, setIsScanning] = useState(false);
 
   // Microphone States
@@ -47,6 +49,9 @@ export default function Enroll() {
   const [isRecording, setIsRecording] = useState(false);
   const [recordingCountdown, setRecordingCountdown] = useState(0);
   const [voiceAudios, setVoiceAudios] = useState([]);
+  const [voiceEmbeddings, setVoiceEmbeddings] = useState([]);
+  const [voiceStatus, setVoiceStatus] = useState(""); // feedback message per clip
+  const [isProcessingVoice, setIsProcessingVoice] = useState(false);
 
   const next = () => setStep((s) => Math.min(s + 1, steps.length - 1));
   const back = () => setStep((s) => Math.max(s - 1, 0));
@@ -89,10 +94,61 @@ export default function Enroll() {
     }
   };
 
+  // Converts a raw PCM Float32Array → WAV Blob (no external lib needed)
+  const encodeWav = (pcmData, sampleRate) => {
+    const numChannels = 1;
+    const bitsPerSample = 16;
+    const byteRate = sampleRate * numChannels * bitsPerSample / 8;
+    const blockAlign = numChannels * bitsPerSample / 8;
+    const dataLength = pcmData.length * 2; // int16 = 2 bytes
+    const buffer = new ArrayBuffer(44 + dataLength);
+    const view = new DataView(buffer);
+    const writeStr = (off, str) => { for (let i = 0; i < str.length; i++) view.setUint8(off + i, str.charCodeAt(i)); };
+    writeStr(0, "RIFF");
+    view.setUint32(4, 36 + dataLength, true);
+    writeStr(8, "WAVE");
+    writeStr(12, "fmt ");
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true);
+    view.setUint16(22, numChannels, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, byteRate, true);
+    view.setUint16(32, blockAlign, true);
+    view.setUint16(34, bitsPerSample, true);
+    writeStr(36, "data");
+    view.setUint32(40, dataLength, true);
+    // Convert float32 → int16
+    let offset = 44;
+    for (let i = 0; i < pcmData.length; i++, offset += 2) {
+      const s = Math.max(-1, Math.min(1, pcmData[i]));
+      view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+    }
+    return new Blob([buffer], { type: "audio/wav" });
+  };
+
+  // Decode MediaRecorder blob → float32 PCM via AudioContext, then re-encode as WAV
+  const blobToWavBase64 = async (blob) => {
+    const arrayBuffer = await blob.arrayBuffer();
+    const audioCtx = new AudioContext({ sampleRate: 16000 });
+    const decoded = await audioCtx.decodeAudioData(arrayBuffer);
+    audioCtx.close();
+    const pcm = decoded.getChannelData(0); // mono
+    const wavBlob = encodeWav(pcm, 16000);
+    return new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.readAsDataURL(wavBlob);
+      reader.onloadend = () => resolve(reader.result);
+    });
+  };
+
   // Initialize/cleanup microphone for Step 2
   useEffect(() => {
     if (step === 2) {
-      navigator.mediaDevices.getUserMedia({ audio: true })
+      navigator.mediaDevices.getUserMedia({ audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl:  true,
+      }})
         .then((s) => {
           setAudioStream(s);
           const recorder = new MediaRecorder(s);
@@ -100,21 +156,50 @@ export default function Enroll() {
 
           let chunks = [];
           recorder.ondataavailable = (e) => {
-            if (e.data.size > 0) {
-              chunks.push(e.data);
-            }
+            if (e.data.size > 0) chunks.push(e.data);
           };
 
-          recorder.onstop = () => {
+          recorder.onstop = async () => {
             const blob = new Blob(chunks, { type: "audio/webm" });
             chunks = [];
-            const reader = new FileReader();
-            reader.readAsDataURL(blob);
-            reader.onloadend = () => {
-              const base64Audio = reader.result;
-              setVoiceAudios((prev) => [...prev, base64Audio]);
-              setVoiceProgress((prev) => Math.min(prev + 1, 2));
-            };
+            setIsProcessingVoice(true);
+            setVoiceStatus("Processing clip…");
+
+            try {
+              // Re-encode as 16 kHz mono WAV — scipy can decode this natively
+              const base64Audio = await blobToWavBase64(blob);
+
+              const res = await fetch("/api/process-voice", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ audio: base64Audio }),
+              });
+
+              if (res.ok) {
+                const result = await res.json();
+                if (result.accepted) {
+                  setVoiceAudios((prev) => [...prev, base64Audio]);
+                  setVoiceEmbeddings((prev) => [...prev, result.embedding || []]);
+                  setVoiceProgress((prev) => Math.min(prev + 1, 2));
+                  setVoiceStatus(
+                    `✓ Clip accepted — SNR ${result.snr_db} dB, voice activity ${(result.vad_ratio * 100).toFixed(0)}%`
+                  );
+                } else {
+                  setVoiceStatus(`✗ ${result.reject_reason}`);
+                }
+              } else {
+                // Pipeline server error — accept clip as-is
+                setVoiceAudios((prev) => [...prev, base64Audio]);
+                setVoiceEmbeddings((prev) => [...prev, []]);
+                setVoiceProgress((prev) => Math.min(prev + 1, 2));
+                setVoiceStatus("✓ Clip saved (pipeline unavailable).");
+              }
+            } catch (err) {
+              console.error("Voice processing error:", err);
+              setVoiceStatus("✗ Failed to process audio. Please try again.");
+            } finally {
+              setIsProcessingVoice(false);
+            }
           };
         })
         .catch((err) => console.error("Microphone access error:", err));
@@ -135,6 +220,7 @@ export default function Enroll() {
     if (videoRef.current && canvasRef.current) {
       const canvas = canvasRef.current;
       const video = videoRef.current;
+      if (!video.videoWidth || !video.videoHeight || video.readyState < 2) return null;
       canvas.width = video.videoWidth || 320;
       canvas.height = video.videoHeight || 240;
       const ctx = canvas.getContext("2d");
@@ -149,12 +235,13 @@ export default function Enroll() {
     setIsScanning(true);
     setFaceProgress(0);
     setFaceImages([]);
+    setFaceEmbeddings([]);
 
     let captured = 0;
     const collectedImages = [];
+    const collectedEmbeddings = [];
 
     for (let attempt = 0; attempt < 60 && captured < 20; attempt++) {
-      // Wait 250ms between frames
       await new Promise((resolve) => setTimeout(resolve, 250));
 
       const dataUrl = captureFrame();
@@ -169,24 +256,32 @@ export default function Enroll() {
 
         if (response.ok) {
           const result = await response.json();
-          if (result.face_detected) {
-            collectedImages.push(dataUrl);
+          if (result.face_detected && result.processed_image) {
+            // Store the InsightFace-processed crop, not the raw webcam frame
+            collectedImages.push(result.processed_image);
+            collectedEmbeddings.push(result.embedding || []);
             captured++;
             setFaceImages([...collectedImages]);
+            setFaceEmbeddings([...collectedEmbeddings]);
             setFaceProgress(captured);
           }
+          // If face not detected in this frame, skip it (don't store)
         } else {
-          // YOLO server error — fall back to capturing the frame anyway
+          // Pipeline server error — fall back to raw frame
           collectedImages.push(dataUrl);
+          collectedEmbeddings.push([]);
           captured++;
           setFaceImages([...collectedImages]);
+          setFaceEmbeddings([...collectedEmbeddings]);
           setFaceProgress(captured);
         }
       } catch {
-        // YOLO server unreachable — fall back to direct capture
+        // Pipeline server unreachable — fall back to raw frame
         collectedImages.push(dataUrl);
+        collectedEmbeddings.push([]);
         captured++;
         setFaceImages([...collectedImages]);
+        setFaceEmbeddings([...collectedEmbeddings]);
         setFaceProgress(captured);
       }
     }
@@ -215,31 +310,22 @@ export default function Enroll() {
 
   const handleComplete = async () => {
     try {
-      const response = await fetch("http://localhost:5001/api/users", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          name,
-          email,
-          role,
-          department,
-          faceSamples: faceProgress,
-          voiceSamples: voiceProgress,
-          faceImages,
-          voiceAudios,
-        }),
+      await api.enrollUser({
+        name,
+        email,
+        role,
+        department,
+        faceSamples: faceProgress,
+        voiceSamples: voiceProgress,
+        faceImages,
+        faceEmbeddings,
+        voiceAudios,
+        voiceEmbeddings,
       });
-      if (response.ok) {
-        navigate("/users");
-      } else {
-        const errData = await response.json();
-        alert("Failed to enroll user: " + (errData.message || response.statusText));
-      }
+      navigate("/users");
     } catch (error) {
       console.error("Error enrolling user:", error);
-      alert("Error enrolling user. Please make sure the backend server is running on port 5001.");
+      alert("Failed to enroll user. Please make sure the backend server is running on port 5001.");
     }
   };
 
@@ -397,7 +483,7 @@ export default function Enroll() {
                   >
                     {isScanning ? "YOLO Auto-Scanning..." : "YOLO Auto-Capture (20 Pics)"}
                   </Button>
-                  <Button variant="ghost" size="sm" onClick={() => { setFaceProgress(0); setFaceImages([]); }}>
+                  <Button variant="ghost" size="sm" onClick={() => { setFaceProgress(0); setFaceImages([]); setFaceEmbeddings([]); }}>
                     Reset
                   </Button>
                 </div>
@@ -412,16 +498,24 @@ export default function Enroll() {
 
           {step === 2 && (
             <div className="grid gap-6 md:grid-cols-2">
-              <div className={`grid aspect-[4/3] place-items-center rounded-lg border border-dashed border-border transition-colors ${isRecording ? "bg-red-500/10 border-red-500/40 animate-pulse" : "bg-surface"}`}>
+              <div className={`grid aspect-[4/3] place-items-center rounded-lg border border-dashed border-border transition-colors ${isRecording ? "bg-red-500/10 border-red-500/40 animate-pulse" : isProcessingVoice ? "bg-yellow-500/10 border-yellow-500/40" : "bg-surface"}`}>
                 <div className="text-center">
-                  <div className={`mx-auto grid h-12 w-12 place-items-center rounded-full ${isRecording ? "bg-red-500 text-white" : "bg-accent text-accent-foreground"}`}>
+                  <div className={`mx-auto grid h-12 w-12 place-items-center rounded-full ${isRecording ? "bg-red-500 text-white" : isProcessingVoice ? "bg-yellow-500 text-white" : "bg-accent text-accent-foreground"}`}>
                     <Mic className="h-5 w-5" />
                   </div>
                   <div className="mt-3 text-sm font-medium">
-                    {isRecording ? `Recording... (${recordingCountdown}s)` : "Microphone input"}
+                    {isRecording
+                      ? `Recording... (${recordingCountdown}s)`
+                      : isProcessingVoice
+                        ? "Analysing clip…"
+                        : "Microphone input"}
                   </div>
                   <p className="mt-1 text-xs text-muted-foreground">
-                    {isRecording ? "Read the passphrase below" : "Read the passphrase clearly in a quiet environment."}
+                    {isRecording
+                      ? "Read the passphrase clearly"
+                      : isProcessingVoice
+                        ? "Checking for noise and voice activity"
+                        : "Read the passphrase clearly in a quiet environment."}
                   </p>
                 </div>
               </div>
@@ -429,7 +523,7 @@ export default function Enroll() {
                 <div>
                   <div className="text-sm font-medium">Voice samples</div>
                   <p className="mt-1 text-xs text-muted-foreground">
-                    Two 10-second clips are used to build the speaker embedding.
+                    Two 10-second clips are used to build the speaker embedding. Background noise is automatically filtered.
                   </p>
                 </div>
                 <div className="rounded-lg border border-border bg-surface p-3 text-sm font-medium text-center italic border-primary/20">
@@ -442,19 +536,44 @@ export default function Enroll() {
                   </div>
                   <Progress value={(voiceProgress / 2) * 100} className="h-1.5" />
                 </div>
+                {voiceStatus && (
+                  <div className={`rounded-md px-3 py-2 text-xs ${
+                    voiceStatus.startsWith("✓")
+                      ? "bg-green-500/10 text-green-600 border border-green-500/20"
+                      : voiceStatus.startsWith("✗")
+                        ? "bg-red-500/10 text-red-600 border border-red-500/20"
+                        : "bg-muted text-muted-foreground"
+                  }`}>
+                    {voiceStatus}
+                  </div>
+                )}
                 <div className="flex gap-2">
                   <Button
                     variant="outline"
                     size="sm"
                     onClick={recordClip}
-                    disabled={isRecording || voiceProgress >= 2}
+                    disabled={isRecording || isProcessingVoice || voiceProgress >= 2}
                   >
-                    {isRecording ? "Recording clip..." : "Record clip (10s)"}
+                    {isRecording
+                      ? `Recording… (${recordingCountdown}s)`
+                      : isProcessingVoice
+                        ? "Analysing…"
+                        : `Record clip ${voiceProgress + 1}/2 (10s)`}
                   </Button>
-                  <Button variant="ghost" size="sm" onClick={() => { setVoiceProgress(0); setVoiceAudios([]); }}>
+                  <Button variant="ghost" size="sm" onClick={() => {
+                    setVoiceProgress(0);
+                    setVoiceAudios([]);
+                    setVoiceEmbeddings([]);
+                    setVoiceStatus("");
+                  }}>
                     Reset
                   </Button>
                 </div>
+                <ul className="mt-2 space-y-1 text-xs text-muted-foreground">
+                  <li>· Speak in a quiet room</li>
+                  <li>· Hold microphone 15–30 cm away</li>
+                  <li>· Clips with too much noise are automatically rejected</li>
+                </ul>
               </div>
             </div>
           )}

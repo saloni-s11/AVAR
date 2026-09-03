@@ -1,21 +1,11 @@
-import React from "react";
+import React, { useState, useEffect } from "react";
 import {
-  Bar,
-  BarChart,
-  CartesianGrid,
-  Cell,
-  Line,
-  LineChart,
-  Pie,
-  PieChart,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
+  Bar, BarChart, CartesianGrid, Cell, Line, LineChart,
+  Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from "recharts";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { PageHeader } from "@/components/page-header";
-import { authTrend, confidenceTrend, modalitySplit } from "@/lib/mock-data";
+import { api } from "@/lib/api";
 
 const chartColors = [
   "var(--color-chart-1)",
@@ -25,6 +15,31 @@ const chartColors = [
 ];
 
 export default function Analytics() {
+  const [data,    setData]    = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    api.getAnalytics()
+      .then(setData)
+      .catch((err) => console.error("Failed to fetch analytics:", err))
+      .finally(() => setLoading(false));
+  }, []);
+
+  const authTrend     = data?.authTrend      || [];
+  const modalitySplit = data?.modalitySplit   || [];
+  const total         = data?.totalAuth       ?? 0;
+  const granted       = data?.grantedTotal    ?? 0;
+  const denied        = data?.deniedTotal     ?? 0;
+  const successRate   = total ? ((granted / total) * 100).toFixed(1) + "%" : "—";
+
+  if (loading) {
+    return (
+      <div className="flex h-64 items-center justify-center text-sm text-muted-foreground">
+        Loading analytics…
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-8">
       <PageHeader
@@ -35,10 +50,10 @@ export default function Analytics() {
 
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         {[
-          { k: "Authentication accuracy", v: "98.6%" },
-          { k: "False Acceptance Rate", v: "0.11%" },
-          { k: "False Rejection Rate", v: "1.24%" },
-          { k: "Median latency", v: "312 ms" },
+          { k: "Total authentications", v: total.toString()  },
+          { k: "Granted",               v: granted.toString()},
+          { k: "Denied",                v: denied.toString() },
+          { k: "Success rate",          v: successRate       },
         ].map((s) => (
           <Card key={s.k} className="border-border shadow-none">
             <CardContent className="p-5">
@@ -50,6 +65,7 @@ export default function Analytics() {
       </div>
 
       <div className="grid gap-6 lg:grid-cols-2">
+        {/* Granted vs denied bar chart */}
         <Card className="border-border shadow-none">
           <CardHeader>
             <CardTitle className="text-base font-semibold">Granted vs. denied</CardTitle>
@@ -57,42 +73,27 @@ export default function Analytics() {
           </CardHeader>
           <CardContent>
             <div className="h-64">
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={authTrend} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
-                  <CartesianGrid vertical={false} stroke="var(--color-border)" />
-                  <XAxis dataKey="day" fontSize={11} tickLine={false} axisLine={false} stroke="var(--color-muted-foreground)" />
-                  <YAxis fontSize={11} tickLine={false} axisLine={false} stroke="var(--color-muted-foreground)" />
-                  <Tooltip contentStyle={{ background: "var(--color-card)", border: "1px solid var(--color-border)", borderRadius: 8, fontSize: 12 }} />
-                  <Bar dataKey="granted" fill="var(--color-primary)" radius={[4, 4, 0, 0]} />
-                  <Bar dataKey="denied" fill="var(--color-destructive)" radius={[4, 4, 0, 0]} />
-                </BarChart>
-              </ResponsiveContainer>
+              {authTrend.length === 0 ? (
+                <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
+                  No data yet.
+                </div>
+              ) : (
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={authTrend} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+                    <CartesianGrid vertical={false} stroke="var(--color-border)" />
+                    <XAxis dataKey="day" fontSize={11} tickLine={false} axisLine={false} stroke="var(--color-muted-foreground)" />
+                    <YAxis fontSize={11} tickLine={false} axisLine={false} stroke="var(--color-muted-foreground)" />
+                    <Tooltip contentStyle={{ background: "var(--color-card)", border: "1px solid var(--color-border)", borderRadius: 8, fontSize: 12 }} />
+                    <Bar dataKey="granted" fill="var(--color-primary)"     radius={[4, 4, 0, 0]} />
+                    <Bar dataKey="denied"  fill="var(--color-destructive)" radius={[4, 4, 0, 0]} />
+                  </BarChart>
+                </ResponsiveContainer>
+              )}
             </div>
           </CardContent>
         </Card>
 
-        <Card className="border-border shadow-none">
-          <CardHeader>
-            <CardTitle className="text-base font-semibold">Confidence trend</CardTitle>
-            <p className="text-xs text-muted-foreground">Hourly average scores across modalities.</p>
-          </CardHeader>
-          <CardContent>
-            <div className="h-64">
-              <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={confidenceTrend} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
-                  <CartesianGrid vertical={false} stroke="var(--color-border)" />
-                  <XAxis dataKey="hour" fontSize={11} tickLine={false} axisLine={false} stroke="var(--color-muted-foreground)" />
-                  <YAxis domain={[0.8, 1]} fontSize={11} tickLine={false} axisLine={false} stroke="var(--color-muted-foreground)" />
-                  <Tooltip contentStyle={{ background: "var(--color-card)", border: "1px solid var(--color-border)", borderRadius: 8, fontSize: 12 }} />
-                  <Line type="monotone" dataKey="face" stroke="var(--color-chart-1)" strokeWidth={2} dot={false} />
-                  <Line type="monotone" dataKey="voice" stroke="var(--color-chart-2)" strokeWidth={2} dot={false} />
-                  <Line type="monotone" dataKey="fused" stroke="var(--color-chart-3)" strokeWidth={2} dot={false} />
-                </LineChart>
-              </ResponsiveContainer>
-            </div>
-          </CardContent>
-        </Card>
-
+        {/* Modality split pie chart */}
         <Card className="border-border shadow-none">
           <CardHeader>
             <CardTitle className="text-base font-semibold">Modality distribution</CardTitle>
@@ -103,14 +104,7 @@ export default function Analytics() {
               <div className="h-56">
                 <ResponsiveContainer width="100%" height="100%">
                   <PieChart>
-                    <Pie
-                      data={modalitySplit}
-                      innerRadius={50}
-                      outerRadius={80}
-                      paddingAngle={2}
-                      dataKey="value"
-                      stroke="var(--color-background)"
-                    >
+                    <Pie data={modalitySplit} innerRadius={50} outerRadius={80} paddingAngle={2} dataKey="value" stroke="var(--color-background)">
                       {modalitySplit.map((_, i) => (
                         <Cell key={i} fill={chartColors[i % chartColors.length]} />
                       ))}
@@ -122,10 +116,7 @@ export default function Analytics() {
               <ul className="space-y-2 text-sm">
                 {modalitySplit.map((m, i) => (
                   <li key={m.name} className="flex items-center gap-2">
-                    <span
-                      className="h-2.5 w-2.5 rounded-sm"
-                      style={{ background: chartColors[i % chartColors.length] }}
-                    />
+                    <span className="h-2.5 w-2.5 rounded-sm" style={{ background: chartColors[i % chartColors.length] }} />
                     <span className="text-muted-foreground">{m.name}</span>
                     <span className="ml-2 tabular-nums font-medium">{m.value}%</span>
                   </li>
@@ -135,7 +126,8 @@ export default function Analytics() {
           </CardContent>
         </Card>
 
-        <Card className="border-border shadow-none">
+        {/* Model performance table */}
+        <Card className="border-border shadow-none lg:col-span-2">
           <CardHeader>
             <CardTitle className="text-base font-semibold">Model performance</CardTitle>
             <p className="text-xs text-muted-foreground">Latest evaluation of face and voice models.</p>
@@ -145,18 +137,18 @@ export default function Analytics() {
               <thead>
                 <tr className="border-b border-border text-left text-xs font-medium uppercase tracking-wider text-muted-foreground">
                   <th className="pb-2">Metric</th>
-                  <th className="pb-2">Face (YOLO+ArcFace)</th>
-                  <th className="pb-2">Voice (MFCC+SV)</th>
+                  <th className="pb-2">Face (YOLO + InsightFace)</th>
+                  <th className="pb-2">Voice (MFCC + SV)</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-border">
                 {[
-                  ["Precision", "0.982", "0.964"],
-                  ["Recall", "0.977", "0.951"],
-                  ["F1 score", "0.979", "0.957"],
-                  ["FAR", "0.09%", "0.14%"],
-                  ["FRR", "0.98%", "1.62%"],
-                  ["Avg. latency", "148 ms", "164 ms"],
+                  ["Precision",    "0.982", "0.964"],
+                  ["Recall",       "0.977", "0.951"],
+                  ["F1 score",     "0.979", "0.957"],
+                  ["FAR",          "0.09%", "0.14%"],
+                  ["FRR",          "0.98%", "1.62%"],
+                  ["Avg. latency", "148 ms","164 ms"],
                 ].map(([k, a, b]) => (
                   <tr key={k}>
                     <td className="py-2.5 text-muted-foreground">{k}</td>

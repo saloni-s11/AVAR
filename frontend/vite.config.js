@@ -20,6 +20,18 @@ export default defineConfig({
         target: "http://localhost:5002",
         changeOrigin: true,
       },
+      "/api/process-voice": {
+        target: "http://localhost:5002",
+        changeOrigin: true,
+      },
+      "/api/authenticate-face": {
+        target: "http://localhost:5002",
+        changeOrigin: true,
+      },
+      "/api/authenticate-voice": {
+        target: "http://localhost:5002",
+        changeOrigin: true,
+      },
       "/api": {
         target: "http://localhost:5001",
         changeOrigin: true,

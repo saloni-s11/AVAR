@@ -1,19 +1,56 @@
-# =============================================================
-#  AVAR Project – Python Dependencies
-#  Install with: pip install -r requirements.txt
-# =============================================================
+# =============================================================================
+#  AVAR Project — Python Dependencies
+#  Install with:  python -m pip install -r requirements.txt
+#
+#  Also required (not pip-installable):
+#    ffmpeg  →  winget install Gyan.FFmpeg
+#               (needed by pydub to decode browser webm audio)
+# =============================================================================
 
+# ── API server ────────────────────────────────────────────────────────────────
 fastapi
 uvicorn
+
+# ── Face Stage 1: YOLO person / face detection ───────────────────────────────
 ultralytics
+
+# ── Face Stage 2: InsightFace alignment + 512-d embedding ────────────────────
+insightface
+onnxruntime
+
+# ── Image processing (used by cv2 / InsightFace / YOLO) ─────────────────────
 opencv-python
 numpy
-python-multipart
-pydantic
 
-# =============================================================
-#  Node.js dependencies are managed by npm, NOT pip.
+# ── Voice Stage 1: Audio decoding (browser WAV → numpy) ──────────────────────
+scipy          # primary WAV decoder — no external deps needed
+soundfile      # fallback decoder
+pydub          # optional fallback — only works if ffmpeg is on PATH
+
+# ── Voice Stage 2: Noise reduction ───────────────────────────────────────────
+noisereduce
+
+# ── Voice Stage 3: Speaker embedding (ECAPA-TDNN) ────────────────────────────
+speechbrain
+torch
+torchaudio
+
+# ── Voice Stage 3 fallback: MFCC feature extraction ─────────────────────────
+librosa
+
+# ── Utilities ─────────────────────────────────────────────────────────────────
+python-multipart   # FastAPI file/form parsing
+pydantic           # request/response models
+
+# =============================================================================
+#  Node.js dependencies — managed by npm, NOT pip
 #
-#  Backend  → cd backend  && npm install
-#  Frontend → cd frontend && npm install
-# =============================================================
+#  Backend  (Express + MongoDB):
+#    cd backend  && npm install
+#    packages: express, mongoose, cors, dotenv, nodemon
+#
+#  Frontend (React + Vite):
+#    cd frontend && npm install
+#    packages: react, react-dom, react-router-dom, vite, tailwindcss,
+#              @tanstack/react-query, lucide-react, recharts, shadcn/ui, …
+# =============================================================================
