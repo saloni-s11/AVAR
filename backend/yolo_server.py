@@ -487,37 +487,14 @@ async def authenticate_face(frame: ImageFrame):
 @app.post("/api/authenticate-voice")
 async def authenticate_voice(clip: AudioClip):
     """
-    Extract speaker embedding from a live audio clip for authentication.
-    Applies denoising but uses relaxed VAD/SNR thresholds for auth.
-    Returns the embedding — Node backend compares it against enrolled users.
+    Identical pipeline to /api/process-voice (enrollment).
+    Same decode → denoise → VAD → SNR → embedding steps.
+    Consistent processing ensures auth embeddings are comparable
+    to enrollment embeddings stored in the database.
     """
-    try:
-        try:
-            audio, sr = decode_audio(clip.audio)
-        except Exception as e:
-            return {"accepted": False, "embedding": [], "reject_reason": str(e),
-                    "vad_ratio": 0.0, "snr_db": -99.0}
-
-        if len(audio) < sr * 0.5:
-            return {"accepted": False, "embedding": [], "reject_reason": "Clip too short.",
-                    "vad_ratio": 0.0, "snr_db": -99.0}
-
-        audio_clean = denoise(audio, sr)
-        vad         = voice_activity_ratio(audio_clean, sr)
-        snr         = snr_db(audio_clean)
-
-        # Relaxed thresholds for auth (user might be in motion)
-        if vad < 0.30:
-            return {"accepted": False, "embedding": [],
-                    "reject_reason": "Too much silence — please speak the passphrase.",
-                    "vad_ratio": round(vad, 3), "snr_db": round(snr, 2)}
-
-        embedding = extract_speaker_embedding(audio_clean, sr)
-        return {"accepted": True, "embedding": embedding,
-                "reject_reason": "", "vad_ratio": round(vad, 3), "snr_db": round(snr, 2)}
-
-    except Exception as e:
-        raise HTTPException(500, f"Auth voice pipeline error: {e}")
+    # Use identical thresholds as enrollment so embeddings are computed
+    # from audio that meets the same quality bar as the stored templates.
+    return await process_voice(clip)
 
 
 if __name__ == "__main__":

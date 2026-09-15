@@ -233,7 +233,7 @@ export default function Authenticate() {
           const res = await fetch("/api/authenticate-voice", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ audio: wavBase64, min_vad: 0.3, min_snr: 5 }),
+            body: JSON.stringify({ audio: wavBase64 }),  // uses same defaults as enrollment
           });
           const data = await res.json();
           if (data.accepted && data.embedding?.length) {

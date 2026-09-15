@@ -119,6 +119,11 @@ app.post("/api/users", async (req, res) => {
     if (!name || !email || !role || !department)
       return res.status(400).json({ message: "Please fill in all profile fields." });
 
+    // Check for duplicate email
+    const existing = await User.findOne({ email });
+    if (existing)
+      return res.status(409).json({ message: `A user with email "${email}" is already enrolled.` });
+
     const count = await User.countDocuments();
     const id = `USR-${String(count + 1).padStart(3, "0")}`;
     const enrolledAt = new Date().toISOString().split("T")[0];
