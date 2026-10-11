@@ -69,6 +69,8 @@ const logSchema = new mongoose.Schema({
   reason:    { type: String, default: "" },
   device:    { type: String, default: "" },
   timestamp: { type: String, required: true },
+  voiceSpoofStatus: { type: String, default: "real_live_speaker" },
+  spoofScore:       { type: Number, default: 0 },
 }, { timestamps: true });
 
 const alertSchema = new mongoose.Schema({
@@ -327,7 +329,61 @@ function simToScore(sim) {
 
 app.post("/api/authenticate", async (req, res) => {
   try {
-    const { faceEmbedding, voiceEmbedding, robotId } = req.body;
+    const { faceEmbedding, voiceEmbedding, robotId, voiceAntispoof } = req.body;
+
+    // ── Voice Anti-Spoofing & Presentation Attack Detection ─────────────────
+    if (voiceAntispoof && !voiceAntispoof.is_live) {
+      const attackLabel = (voiceAntispoof.verdict || "spoof_attack").replace(/_/g, " ").toUpperCase();
+      const reasonMsg = `Voice Anti-Spoofing: ${attackLabel} detected. ${voiceAntispoof.explanation || "Biometric liveness failed."}`;
+
+      // Trigger critical security alert in MongoDB
+      const alertCount = await Alert.countDocuments();
+      const alertId = `ALT-${String(alertCount + 1).padStart(3, "0")}`;
+      await Alert.create({
+        id: alertId,
+        severity: "critical",
+        type: "voice_spoof_attempt",
+        robotId: robotId || "RBT-000",
+        message: `Security Breach Attempt: Voice Presentation Attack (${attackLabel}) on ${robotId || "device"}. Authentication aborted.`,
+        timestamp: new Date().toLocaleString("en-GB"),
+      });
+
+      // Record attack in audit logs
+      const logCount = await Log.countDocuments();
+      const logId = `LOG-${String(logCount + 1).padStart(4, "0")}`;
+      const timestamp = new Date().toLocaleTimeString("en-GB", {
+        hour: "2-digit", minute: "2-digit", second: "2-digit",
+      });
+
+      await Log.create({
+        id: logId,
+        userId: "BLOCKED_ATTACKER",
+        userName: `Spoof Attempt (${attackLabel})`,
+        robotId: robotId || "RBT-000",
+        robotName: robotId ? (await Robot.findOne({ id: robotId }))?.name || robotId : "Unknown",
+        faceScore: 0,
+        voiceScore: 0,
+        fusedScore: 0,
+        result: "denied",
+        reason: reasonMsg,
+        device: "Live session (Spoof Detected)",
+        timestamp,
+        voiceSpoofStatus: voiceAntispoof.verdict || "spoof_attack",
+        spoofScore: voiceAntispoof.spoof_score || 0.95,
+      });
+
+      return res.json({
+        result: "denied",
+        reason: reasonMsg,
+        faceScore: 0,
+        voiceScore: 0,
+        fusedScore: 0,
+        threshold: 60,
+        latencyMs: 160,
+        matchedUser: null,
+        voiceAntispoof,
+      });
+    }
 
     if (!faceEmbedding && !voiceEmbedding) {
       return res.status(400).json({ message: "At least one embedding required." });
@@ -417,6 +473,8 @@ app.post("/api/authenticate", async (req, res) => {
       reason:    granted ? "" : `Face ${bestFaceScore.toFixed(1)}% and Voice ${bestVoiceScore.toFixed(1)}% both below threshold ${THRESHOLD}%`,
       device:    "Live session",
       timestamp,
+      voiceSpoofStatus: voiceAntispoof?.verdict || "real_live_speaker",
+      spoofScore:       voiceAntispoof?.spoof_score || 0,
     });
 
     // Update robot lastAuth + counter
@@ -446,6 +504,7 @@ app.post("/api/authenticate", async (req, res) => {
         role:       bestMatch.role,
         department: bestMatch.department,
       } : null,
+      voiceAntispoof: voiceAntispoof || null,
     });
 
   } catch (err) {

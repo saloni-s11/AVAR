@@ -40,10 +40,11 @@ export default function Logs() {
   const paginated  = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
 
   const exportCsv = () => {
-    const header = "Log ID,User,User ID,Robot,Robot ID,Face %,Voice %,Fused %,Result,Reason,Device,Timestamp";
+    const header = "Log ID,User,User ID,Robot,Robot ID,Face %,Voice %,Fused %,Voice PAD,Result,Reason,Device,Timestamp";
     const rows = filtered.map((l) =>
       [l.id, l.userName, l.userId, l.robotName, l.robotId,
         (l.faceScore * 100).toFixed(1), (l.voiceScore * 100).toFixed(1), (l.fusedScore * 100).toFixed(1),
+        l.voiceSpoofStatus || "real_live_speaker",
         l.result, `"${(l.reason || "").replace(/"/g, '""')}"`, l.device, l.timestamp
       ].join(",")
     );
@@ -55,12 +56,25 @@ export default function Logs() {
     a.click(); URL.revokeObjectURL(url);
   };
 
+  const getPadBadge = (status) => {
+    switch (status) {
+      case "replay_attack":
+        return <StatusBadge tone="danger">Replay Attack</StatusBadge>;
+      case "synthetic_voice":
+        return <StatusBadge tone="danger">Synthetic Voice</StatusBadge>;
+      case "recorded_voice":
+        return <StatusBadge tone="warning">Recorded Voice</StatusBadge>;
+      default:
+        return <StatusBadge tone="success">Live Speaker</StatusBadge>;
+    }
+  };
+
   return (
     <div className="space-y-8">
       <PageHeader
         eyebrow="Security"
         title="Authentication logs"
-        description="Every authentication attempt is recorded with biometric confidence scores and device metadata."
+        description="Every authentication attempt is recorded with biometric confidence scores, voice PAD liveness, and device metadata."
         actions={
           <Button variant="outline" size="sm" onClick={exportCsv}>
             <Download className="mr-1.5 h-4 w-4" />
@@ -104,6 +118,7 @@ export default function Logs() {
                   <th className="px-5 py-2.5">Face</th>
                   <th className="px-5 py-2.5">Voice</th>
                   <th className="px-5 py-2.5">Fused</th>
+                  <th className="px-5 py-2.5">Voice PAD</th>
                   <th className="px-5 py-2.5">Result</th>
                   <th className="px-5 py-2.5">Device</th>
                   <th className="px-5 py-2.5">Timestamp</th>
@@ -112,13 +127,13 @@ export default function Logs() {
               <tbody className="divide-y divide-border">
                 {loading ? (
                   <tr>
-                    <td colSpan={9} className="px-5 py-16 text-center text-sm text-muted-foreground">
+                    <td colSpan={10} className="px-5 py-16 text-center text-sm text-muted-foreground">
                       Loading logs…
                     </td>
                   </tr>
                 ) : filtered.length === 0 ? (
                   <tr>
-                    <td colSpan={9} className="px-5 py-16 text-center text-sm text-muted-foreground">
+                    <td colSpan={10} className="px-5 py-16 text-center text-sm text-muted-foreground">
                       No log entries match your filters.
                     </td>
                   </tr>
@@ -130,6 +145,7 @@ export default function Logs() {
                     <td className="px-5 py-3 tabular-nums text-muted-foreground">{(l.faceScore  * 100).toFixed(1)}%</td>
                     <td className="px-5 py-3 tabular-nums text-muted-foreground">{(l.voiceScore * 100).toFixed(1)}%</td>
                     <td className="px-5 py-3 tabular-nums font-medium">{(l.fusedScore * 100).toFixed(1)}%</td>
+                    <td className="px-5 py-3">{getPadBadge(l.voiceSpoofStatus)}</td>
                     <td className="px-5 py-3">
                       <StatusBadge tone={l.result === "granted" ? "success" : "danger"}>
                         {l.result === "granted" ? "Granted" : "Denied"}

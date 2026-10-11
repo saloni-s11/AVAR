@@ -30,6 +30,10 @@ pydub          # optional fallback — only works if ffmpeg is on PATH
 # ── Voice Stage 2: Noise reduction ───────────────────────────────────────────
 noisereduce
 
+# ── Voice Stage 2.5: Anti-Spoofing & Liveness (PAD — ASVspoof / ISO 30107) ───
+# Detects: Real live speaker, Replay attack, Synthetic/cloned voice, Recorded voice
+# Powered by: scipy, numpy, librosa (voice_antispoofing.py)
+
 # ── Voice Stage 3: Speaker embedding (ECAPA-TDNN) ────────────────────────────
 speechbrain
 torch

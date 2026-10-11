@@ -37,3 +37,10 @@ lerna-debug.log*
 *.njsproj
 *.sln
 *.sw?
+
+# Python cache & virtual environments
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+backend/venv/
