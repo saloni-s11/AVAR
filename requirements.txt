@@ -12,15 +12,16 @@ fastapi
 uvicorn
 
 # ── Face Stage 1: YOLO person / face detection ───────────────────────────────
-ultralytics
+ultralytics   # Detects faces or person regions using the YOLO model.
 
 # ── Face Stage 2: InsightFace alignment + 512-d embedding ────────────────────
 insightface
-onnxruntime
+onnxruntime    #Runs ONNX-based face-recognition and anti-spoofing models on the CPU.
 
-# ── Image processing (used by cv2 / InsightFace / YOLO) ─────────────────────
+# Image processing and face liveness detection
 opencv-python
-numpy
+numpy      #Represents images and facial embeddings as arrays and supports numerical calculations.
+mediapipe  #Supports facial landmark tracking for the liveness logic in liveness.py.
 
 # ── Voice Stage 1: Audio decoding (browser WAV → numpy) ──────────────────────
 scipy          # primary WAV decoder — no external deps needed
