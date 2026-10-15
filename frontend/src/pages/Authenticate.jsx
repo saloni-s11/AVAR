@@ -1,11 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import {
-  Camera,
-  CheckCircle2,
-  Mic,
-  Play,
-  Waves,
-  XCircle,
+  Camera, CheckCircle2, Mic, Play, ShieldCheck,
+  ShieldX, Waves, XCircle,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -14,30 +10,40 @@ import { PageHeader } from "@/components/page-header";
 import { StatusBadge } from "@/components/status-badge";
 import { api } from "@/lib/api";
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
+  Select, SelectContent, SelectItem,
+  SelectTrigger, SelectValue,
 } from "@/components/ui/select";
 
 // Weighted fusion — same weights as server, shown in UI
-const FACE_W = 0.6;
-const VOICE_W = 0.4;
+const FACE_W   = 0.6;
+const VOICE_W  = 0.4;
 const THRESHOLD = 60; // % — grant if face OR voice independently clears this
 
 export default function Authenticate() {
-  const [robots, setRobots] = useState([]);
-  const [selectedRobot, setSelectedRobot] = useState("");
-  const [phase, setPhase] = useState("idle");
+  const [robots,       setRobots]       = useState([]);
+  const [selectedRobot,setSelectedRobot]= useState("");
+  const [phase,        setPhase]        = useState("idle");
   // idle | capturing | processing | result
 
   // Scores (0–100 %)
-  const [faceScore, setFaceScore] = useState(0);
+  const [faceScore,  setFaceScore]  = useState(0);
   const [voiceScore, setVoiceScore] = useState(0);
   const [fusedScore, setFusedScore] = useState(0);
   const [authResult, setAuthResult] = useState(null); // full response from /api/authenticate
+  // Liveness / anti-spoofing state
+const [livenessStep, setLivenessStep] = useState("idle");
+const [livenessDebug, setLivenessDebug] = useState({
+  ear: 0,
+  eyesClosed: false,
+  nose: 0,
+});
+// idle | blink | left | right | passed | failed
 
+const [livenessMessage, setLivenessMessage] = useState(
+  "Liveness check not started."
+);
+
+const livenessRunningRef = useRef(false);
   // Camera
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
@@ -65,10 +71,9 @@ export default function Authenticate() {
   // Mic
   const [micStream, setMicStream] = useState(null);
 
-  // Embeddings & Anti-Spoofing collected during session
+  // Embeddings collected during session
   const faceEmbeddingRef = useRef(null);
   const voiceEmbeddingRef = useRef(null);
-  const voiceAntispoofRef = useRef(null);
 
   // Animated waveform ticker
   const [tick, setTick] = useState(0);
@@ -80,12 +85,8 @@ export default function Authenticate() {
 
   // Load robots
   useEffect(() => {
-    api
-      .getRobots()
-      .then((r) => {
-        setRobots(r);
-        if (r.length) setSelectedRobot(r[0].id);
-      })
+    api.getRobots()
+      .then((r) => { setRobots(r); if (r.length) setSelectedRobot(r[0].id); })
       .catch(console.error);
   }, []);
 
@@ -109,14 +110,13 @@ export default function Authenticate() {
         videoRef.current.srcObject = s;
         await videoRef.current.play().catch(() => {});
       }
+      // Wait for video element to be ready with valid dimensions
       await new Promise((resolve) => {
         let attempts = 0;
         const check = () => {
           attempts++;
           if (
-            (videoRef.current &&
-              videoRef.current.readyState >= 2 &&
-              videoRef.current.videoWidth > 0) ||
+            (videoRef.current && videoRef.current.readyState >= 2 && videoRef.current.videoWidth > 0) ||
             attempts > 20
           ) {
             resolve();
@@ -134,6 +134,7 @@ export default function Authenticate() {
     }
   };
 
+  // Auto-start camera when mounting component
   useEffect(() => {
     startCamera();
     return () => {
@@ -143,6 +144,15 @@ export default function Authenticate() {
       }
     };
   }, []);
+
+  const stopCamera = () => {
+    if (videoRef.current) videoRef.current.srcObject = null;
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((t) => t.stop());
+      streamRef.current = null;
+    }
+    setCamStream(null);
+  };
 
   const captureFrame = () => {
     const video = videoRef.current;
@@ -156,8 +166,9 @@ export default function Authenticate() {
     return canvas.toDataURL("image/jpeg");
   };
 
-  // ── Face capture ──────────────────────────────────────────────────────────
+  // ── Face capture — grab frames, retry until face detected ──────────────────
   const captureFaceEmbedding = async () => {
+    // Wait for video to be ready if needed
     for (let i = 0; i < 20; i++) {
       await new Promise((r) => setTimeout(r, 250));
       const frame = captureFrame();
@@ -170,6 +181,11 @@ export default function Authenticate() {
         });
         if (res.ok) {
           const data = await res.json();
+          setLivenessDebug({
+  ear: ((data.left_ear + data.right_ear) / 2).toFixed(3),
+  eyesClosed: data.eyes_closed,
+  nose: Number(data.nose_position).toFixed(3),
+});
           if (data.face_detected && data.embedding) {
             faceEmbeddingRef.current = data.embedding;
             return true;
@@ -179,38 +195,189 @@ export default function Authenticate() {
         console.error("Face authentication fetch error:", e);
       }
     }
-    return false;
+    return false; // no face found after 20 attempts
   };
+  // ── Liveness / Anti-Spoofing ─────────────────────────────────────────────
 
-  // ── Audio encoding helpers ────────────────────────────────────────────────
+const runLivenessCheck = async () => {
+  livenessRunningRef.current = true;
+
+  setLivenessStep("blink");
+  setLivenessMessage("Please blink your eyes.");
+
+  let stage = "blink";
+  const earHistory = [];
+  let headStart = null;
+
+  const startTime = Date.now();
+  const timeout = 30000; // 30 seconds
+
+  while (
+    Date.now() - startTime < timeout &&
+    livenessRunningRef.current
+  ) {
+    try {
+      const frame = captureFrame();
+
+      if (!frame) {
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        continue;
+      }
+
+      const res = await fetch("/api/liveness-check", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          image: frame,
+        }),
+      });
+
+      if (!res.ok) {
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        continue;
+      }
+
+      const data = await res.json();
+
+      // Face not detected
+      if (!data.face_detected) {
+        setLivenessMessage(
+          "Face not detected. Please look at the camera."
+        );
+
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        continue;
+      }
+
+      // ──────────────── STEP 1: BLINK ────────────────
+      if (stage === "blink") {
+        const averageEAR =
+          (data.left_ear + data.right_ear) / 2;
+
+        earHistory.push(averageEAR);
+
+        if (earHistory.length > 12) {
+          earHistory.shift();
+        }
+
+        let closedFrames = 0;
+        let blinkDetected = false;
+
+        for (const ear of earHistory) {
+          if (ear < 0.21) {
+            closedFrames++;
+          } else {
+            if (closedFrames >= 2) {
+              blinkDetected = true;
+              break;
+            }
+
+            closedFrames = 0;
+          }
+        }
+
+        if (blinkDetected) {
+          stage = "left";
+          headStart = data.nose_position;
+
+          setLivenessStep("left");
+          setLivenessMessage(
+            "Blink detected ✓ Now slowly turn your head LEFT."
+          );
+        }
+      }
+
+      // ──────────────── STEP 2: TURN LEFT ────────────────
+      else if (stage === "left") {
+        if (headStart === null) {
+          headStart = data.nose_position;
+        }
+
+        const movement =
+          data.nose_position - headStart;
+
+        if (movement < -0.06) {
+          stage = "right";
+
+          headStart = data.nose_position;
+
+          setLivenessStep("right");
+          setLivenessMessage(
+            "Left movement detected ✓ Now slowly turn your head RIGHT."
+          );
+        }
+      }
+
+      // ──────────────── STEP 3: TURN RIGHT ────────────────
+      else if (stage === "right") {
+        if (headStart === null) {
+          headStart = data.nose_position;
+        }
+
+        const movement =
+          data.nose_position - headStart;
+
+        if (movement > 0.06) {
+          stage = "passed";
+
+          setLivenessStep("passed");
+          setLivenessMessage(
+            "Liveness verification passed ✓"
+          );
+
+          livenessRunningRef.current = false;
+
+          return true;
+        }
+      }
+
+      // About 5 frames per second
+      await new Promise((resolve) =>
+        setTimeout(resolve, 200)
+      );
+
+    } catch (error) {
+      console.error("Liveness check error:", error);
+
+      await new Promise((resolve) =>
+        setTimeout(resolve, 200)
+      );
+    }
+  }
+
+  // Liveness failed / timed out
+  livenessRunningRef.current = false;
+
+  setLivenessStep("failed");
+  setLivenessMessage(
+    "Liveness verification failed. Please try again."
+  );
+
+  return false;
+};
+
+  // ── WAV encoding helpers (same as Enroll) ────────────────────────────────
   const encodeWav = (pcmData, sampleRate) => {
-    const numChannels = 1;
-    const bitsPerSample = 16;
-    const byteRate = (sampleRate * numChannels * bitsPerSample) / 8;
-    const blockAlign = (numChannels * bitsPerSample) / 8;
+    const numChannels = 1, bitsPerSample = 16;
+    const byteRate = sampleRate * numChannels * bitsPerSample / 8;
+    const blockAlign = numChannels * bitsPerSample / 8;
     const dataLength = pcmData.length * 2;
     const buffer = new ArrayBuffer(44 + dataLength);
     const view = new DataView(buffer);
-    const writeStr = (off, str) => {
-      for (let i = 0; i < str.length; i++) view.setUint8(off + i, str.charCodeAt(i));
-    };
-    writeStr(0, "RIFF");
-    view.setUint32(4, 36 + dataLength, true);
-    writeStr(8, "WAVE");
-    writeStr(12, "fmt ");
-    view.setUint32(16, 16, true);
-    view.setUint16(20, 1, true);
-    view.setUint16(22, numChannels, true);
-    view.setUint32(24, sampleRate, true);
-    view.setUint32(28, byteRate, true);
-    view.setUint16(32, blockAlign, true);
-    view.setUint16(34, bitsPerSample, true);
-    writeStr(36, "data");
+    const writeStr = (off, str) => { for (let i = 0; i < str.length; i++) view.setUint8(off + i, str.charCodeAt(i)); };
+    writeStr(0, "RIFF"); view.setUint32(4, 36 + dataLength, true);
+    writeStr(8, "WAVE"); writeStr(12, "fmt ");
+    view.setUint32(16, 16, true); view.setUint16(20, 1, true);
+    view.setUint16(22, numChannels, true); view.setUint32(24, sampleRate, true);
+    view.setUint32(28, byteRate, true); view.setUint16(32, blockAlign, true);
+    view.setUint16(34, bitsPerSample, true); writeStr(36, "data");
     view.setUint32(40, dataLength, true);
     let offset = 44;
     for (let i = 0; i < pcmData.length; i++, offset += 2) {
       const s = Math.max(-1, Math.min(1, pcmData[i]));
-      view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+      view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
     }
     return new Blob([buffer], { type: "audio/wav" });
   };
@@ -228,16 +395,14 @@ export default function Authenticate() {
     });
   };
 
-  // ── Voice capture with internal anti-spoofing check ───────────────────────
+  // ── Voice capture — record 5 s, convert to WAV, send to pipeline ─────────
   const captureVoiceEmbedding = (activeMicStream) =>
     new Promise((resolve) => {
       if (!activeMicStream) return resolve(false);
       const recorder = new MediaRecorder(activeMicStream);
       const chunks = [];
 
-      recorder.ondataavailable = (e) => {
-        if (e.data.size > 0) chunks.push(e.data);
-      };
+      recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
 
       recorder.onstop = async () => {
         try {
@@ -246,21 +411,16 @@ export default function Authenticate() {
           const res = await fetch("/api/authenticate-voice", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ audio: wavBase64 }),
+            body: JSON.stringify({ audio: wavBase64 }),  // uses same defaults as enrollment
           });
           const data = await res.json();
-          if (data.antispoof) {
-            voiceAntispoofRef.current = data.antispoof;
-          }
           if (data.accepted && data.embedding?.length) {
             voiceEmbeddingRef.current = data.embedding;
             resolve(true);
           } else {
             resolve(false);
           }
-        } catch {
-          resolve(false);
-        }
+        } catch { resolve(false); }
       };
 
       recorder.start();
@@ -276,64 +436,111 @@ export default function Authenticate() {
     setAuthResult(null);
     faceEmbeddingRef.current = null;
     voiceEmbeddingRef.current = null;
-    voiceAntispoofRef.current = null;
 
-    await startCamera();
+   // Ensure camera is active
+const camera = await startCamera();
 
-    let activeMic = null;
-    try {
-      activeMic = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-      });
-      setMicStream(activeMic);
-    } catch (e) {
-      console.error("Mic error:", e);
-    }
+if (!camera) {
+  setPhase("result");
+  setAuthResult({
+    result: "denied",
+    reason: "Camera could not be started.",
+    faceScore: 0,
+    voiceScore: 0,
+    fusedScore: 0,
+  });
+  return;
+}
 
-    await Promise.all([captureFaceEmbedding(), captureVoiceEmbedding(activeMic)]);
+// ──────────────── LIVENESS FIRST ────────────────
+
+const livenessPassed = await runLivenessCheck();
+
+if (!livenessPassed) {
+  setPhase("result");
+
+  setAuthResult({
+    result: "denied",
+    reason: "Liveness verification failed.",
+    faceScore: 0,
+    voiceScore: 0,
+    fusedScore: 0,
+  });
+
+  return;
+}
+
+// ──────────────── START VOICE CAPTURE ────────────────
+
+let activeMic = null;
+
+try {
+  activeMic = await navigator.mediaDevices.getUserMedia({
+    audio: {
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true,
+    },
+  });
+
+  setMicStream(activeMic);
+} catch (e) {
+  console.error("Mic error:", e);
+}
+
+// ──────────────── FACE + VOICE CAPTURE ────────────────
+
+await Promise.all([
+  captureFaceEmbedding(),
+  captureVoiceEmbedding(activeMic),
+]);
+
 
     setPhase("processing");
 
+    // Send embeddings to Node for matching
     try {
       const result = await api.authenticate({
         faceEmbedding: faceEmbeddingRef.current,
         voiceEmbedding: voiceEmbeddingRef.current,
         robotId: selectedRobot,
-        voiceAntispoof: voiceAntispoofRef.current,
       });
 
-      setFaceScore(result.faceScore || 0);
-      setVoiceScore(result.voiceScore || 0);
-      setFusedScore(result.fusedScore || 0);
+      setFaceScore(result.faceScore);
+      setVoiceScore(result.voiceScore);
+      setFusedScore(result.fusedScore);
       setAuthResult(result);
     } catch (e) {
       console.error("Auth error:", e);
-      setAuthResult({
-        result: "denied",
-        reason: "Server error during matching.",
-        faceScore: 0,
-        voiceScore: 0,
-        fusedScore: 0,
-      });
+      setAuthResult({ result: "denied", reason: "Server error during matching.", faceScore: 0, voiceScore: 0, fusedScore: 0 });
     }
 
+    // Clean up mic
     activeMic?.getTracks().forEach((t) => t.stop());
     setMicStream(null);
     setPhase("result");
+    // Keep camera running so live feed remains active
   };
 
   const reset = () => {
-    micStream?.getTracks().forEach((t) => t.stop());
-    setMicStream(null);
-    setPhase("idle");
-    setFaceScore(0);
-    setVoiceScore(0);
-    setFusedScore(0);
-    setAuthResult(null);
-    faceEmbeddingRef.current = null;
-    voiceEmbeddingRef.current = null;
-    voiceAntispoofRef.current = null;
-  };
+  livenessRunningRef.current = false;
+
+  micStream?.getTracks().forEach((t) => t.stop());
+  setMicStream(null);
+
+  setPhase("idle");
+
+  setLivenessStep("idle");
+  setLivenessMessage("Liveness check not started.");
+
+  setFaceScore(0);
+  setVoiceScore(0);
+  setFusedScore(0);
+  setAuthResult(null);
+
+  faceEmbeddingRef.current = null;
+  voiceEmbeddingRef.current = null;
+};
 
   const isRunning = phase === "capturing" || phase === "processing";
 
@@ -357,48 +564,76 @@ export default function Authenticate() {
                 ))}
               </SelectContent>
             </Select>
-          ) : null
+          ) : (
+            <span className="text-sm text-muted-foreground">No robots registered</span>
+          )
         }
       />
 
-      <div className="grid gap-6 lg:grid-cols-2">
-        {/* Sensor Feeds */}
-        <Card className="border-border shadow-none">
-          <CardHeader className="pb-3">
-            <CardTitle className="text-base font-semibold">Sensor streams</CardTitle>
-            <p className="text-xs text-muted-foreground">
-              Optical camera and microphone hardware feeds.
-            </p>
-          </CardHeader>
-          <CardContent className="space-y-4">
+      <div className="grid gap-6 lg:grid-cols-3">
+        {/* Camera + Mic panels */}
+        <Card className="border-border shadow-none lg:col-span-2">
+          <CardContent className="grid gap-4 p-4 sm:grid-cols-2">
+
             {/* Camera */}
-            <div className="relative aspect-video overflow-hidden rounded-lg border border-border bg-black">
-              <video
-                ref={setVideoRef}
-                autoPlay
-                playsInline
-                muted
-                className="h-full w-full object-cover"
-              />
-              <canvas ref={canvasRef} className="hidden" />
-
-              <div className="absolute left-3 top-3 flex items-center gap-2 rounded bg-black/60 px-2 py-1 text-xs text-white backdrop-blur">
-                <Camera className="h-3.5 w-3.5 text-green-400" />
-                <span>Camera · Cam-01</span>
+            <div className="relative overflow-hidden rounded-lg border border-border bg-[oklch(0.20_0.02_250)]">
+              <div className="aspect-[4/3] w-full relative">
+                {/* Video always mounted so ref is stable — hidden when no stream */}
+                <video
+                  ref={setVideoRef}
+                  autoPlay
+                  playsInline
+                  muted
+                  className={`absolute inset-0 h-full w-full object-cover ${camStream ? "opacity-100" : "opacity-0"}`}
+                />
+                {!camStream && (
+                  <div className="absolute inset-0 grid place-items-center text-primary-foreground/60 p-4 text-center">
+                    <div>
+                      <Camera className="mx-auto h-6 w-6 opacity-50 mb-2" />
+                      {camError ? (
+                        <div className="space-y-2">
+                          <p className="text-xs text-red-400 font-medium">{camError}</p>
+                          <Button size="sm" variant="outline" onClick={startCamera} className="text-xs h-7">
+                            Retry Camera
+                          </Button>
+                        </div>
+                      ) : (
+                        <div>
+                          <div className="text-xs opacity-50">Camera stream · Cam-01</div>
+                          <Button size="sm" variant="ghost" onClick={startCamera} className="mt-2 text-xs h-7 text-primary-foreground/80">
+                            Start Camera Stream
+                          </Button>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
               </div>
-
-              {camError && (
-                <div className="absolute inset-0 flex items-center justify-center bg-black/80 p-4 text-center text-xs text-red-400">
-                  {camError}
-                </div>
-              )}
+              <canvas ref={canvasRef} className="hidden" />
+              <div className="pointer-events-none absolute inset-6 rounded-md border border-primary-foreground/20" />
+              <div className="pointer-events-none absolute left-4 top-4 flex items-center gap-1.5 rounded-full bg-black/40 px-2 py-0.5 text-[11px] text-white">
+                <span className={`h-1.5 w-1.5 rounded-full ${camStream ? (isRunning ? "animate-pulse bg-red-500" : "bg-emerald-500") : "bg-white/40"}`} />
+                {camStream ? (isRunning ? "LIVE SCAN" : "CAMERA ACTIVE") : "STANDBY"}
+              </div>
+              <div className="absolute inset-x-4 bottom-3 text-[11px] text-white/70 bg-black/50 backdrop-blur px-2.5 py-1 rounded">
+                Face detection ·{" "}
+{phase === "idle"
+  ? (camStream ? "Ready" : "Standby")
+  : phase === "capturing"
+  ? livenessStep === "passed"
+    ? "Liveness passed ✓"
+    : "Liveness check…"
+  : phase === "processing"
+  ? "Processing embedding…"
+  : faceEmbeddingRef.current
+  ? "Captured ✓"
+  : "No face found"}
+              </div>
             </div>
 
             {/* Microphone */}
             <div className="relative overflow-hidden rounded-lg border border-border bg-[oklch(0.20_0.02_250)] p-5">
-              <div className="text-xs text-primary-foreground/70">
-                Microphone · Mic-01
-              </div>
+              <div className="text-xs text-primary-foreground/70">Microphone · Mic-01</div>
               <div className="mt-6 flex h-28 items-end gap-[2px]">
                 {Array.from({ length: 48 }).map((_, i) => {
                   const active = isRunning;
@@ -441,6 +676,7 @@ export default function Authenticate() {
             </p>
           </CardHeader>
           <CardContent className="space-y-5">
+
             {/* Face score */}
             <div>
               <div className="mb-1.5 flex items-center justify-between text-xs">
@@ -488,13 +724,51 @@ export default function Authenticate() {
                 </div>
               )}
               {phase === "capturing" && (
-                <div className="space-y-2">
-                  <StatusBadge tone="info">Capturing face &amp; voice…</StatusBadge>
-                  <p className="text-xs text-muted-foreground">
-                    Please look at the camera and read the passphrase aloud.
-                  </p>
-                </div>
-              )}
+  <div className="space-y-3">
+    <StatusBadge tone="info">
+      {livenessStep === "passed"
+        ? "Liveness verified ✓"
+        : "Liveness verification"}
+    </StatusBadge>
+
+    <div className="rounded-lg border border-border bg-background p-3">
+      <div className="text-sm font-medium text-foreground">
+        {livenessMessage}
+      </div>
+
+      <div className="mt-3 space-y-1.5 text-xs text-muted-foreground">
+        <div className={livenessStep === "blink" ? "font-medium text-primary" : ""}>
+          👁️ Blink your eyes
+        </div>
+
+        <div className={livenessStep === "left" ? "font-medium text-primary" : ""}>
+          ← Turn your head LEFT
+        </div>
+
+        <div className={livenessStep === "right" ? "font-medium text-primary" : ""}>
+          → Turn your head RIGHT
+        </div>
+
+        <div className={livenessStep === "passed" ? "font-medium text-green-600" : ""}>
+          ✓ Liveness verification passed
+        </div>
+        <div className="mt-3 rounded-md bg-muted/50 p-2 text-[11px] text-muted-foreground">
+  <div>EAR: {livenessDebug.ear}</div>
+  <div>
+    Eyes: {livenessDebug.eyesClosed ? "Closed" : "Open"}
+  </div>
+  <div>Nose position: {livenessDebug.nose}</div>
+</div>
+      </div>
+    </div>
+
+    {livenessStep === "passed" && (
+      <p className="text-xs text-muted-foreground">
+        Starting face and voice authentication…
+      </p>
+    )}
+  </div>
+)}
               {phase === "processing" && (
                 <StatusBadge tone="warning">Running decision engine…</StatusBadge>
               )}
@@ -508,8 +782,8 @@ export default function Authenticate() {
                         Identified as{" "}
                         <span className="font-medium text-foreground">
                           {authResult.matchedUser?.name}
-                        </span>{" "}
-                        · {authResult.matchedUser?.role}
+                        </span>
+                        {" "}· {authResult.matchedUser?.role}
                       </div>
                       <div className="text-[11px] text-muted-foreground">
                         Latency: {authResult.latencyMs} ms
@@ -519,9 +793,7 @@ export default function Authenticate() {
                     <>
                       <XCircle className="mx-auto h-7 w-7 text-red-500" />
                       <div className="text-sm font-semibold text-red-600">Access denied</div>
-                      <div className="text-xs text-muted-foreground">
-                        {authResult.reason}
-                      </div>
+                      <div className="text-xs text-muted-foreground">{authResult.reason}</div>
                     </>
                   )}
                 </div>
@@ -544,6 +816,40 @@ export default function Authenticate() {
           </CardContent>
         </Card>
       </div>
+
+      {/* Pipeline steps */}
+      <Card className="border-border shadow-none">
+        <CardHeader className="pb-2">
+          <CardTitle className="text-base font-semibold">Session pipeline</CardTitle>
+          <p className="text-xs text-muted-foreground">
+            Steps executed by the AVAR authentication engine.
+          </p>
+        </CardHeader>
+        <CardContent className="grid gap-3 md:grid-cols-5">
+          {[
+            { label: "Input capture",        done: phase !== "idle" },
+            { label: "Noise reduction",      done: phase === "processing" || phase === "result" },
+            { label: "Feature extraction",   done: phase === "processing" || phase === "result" },
+            { label: "Cosine matching",      done: phase === "result" },
+            { label: "Decision & logging",   done: phase === "result" },
+          ].map((s, i) => (
+            <div
+              key={s.label}
+              className={`rounded-lg border p-4 transition-colors ${
+                s.done ? "border-green-500/30 bg-green-500/5" : "border-border bg-surface"
+              }`}
+            >
+              <div className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+                Step {i + 1}
+              </div>
+              <div className="mt-2 flex items-center gap-2 text-sm font-medium">
+                <ShieldCheck className={`h-4 w-4 ${s.done ? "text-green-500" : "text-primary"}`} />
+                {s.label}
+              </div>
+            </div>
+          ))}
+        </CardContent>
+      </Card>
     </div>
   );
 }

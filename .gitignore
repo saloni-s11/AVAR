@@ -37,10 +37,11 @@ lerna-debug.log*
 *.njsproj
 *.sln
 *.sw?
-
-# Python cache & virtual environments
-__pycache__/
+.env
+**/.env
+*.log
+backend/debug_face.png
+backend/yolo_server.py.backup
+frontend/mask_face_detection.py
+**/__pycache__/
 *.py[cod]
-*$py.class
-venv/
-backend/venv/

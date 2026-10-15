@@ -11,6 +11,13 @@ Endpoints:
 import base64
 import io
 import cv2
+from liveness import (
+    process_liveness_frame,
+    detect_blink,
+    calculate_head_direction,
+    evaluate_liveness,
+    predict_face_anti_spoof,
+)
 import numpy as np
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -31,15 +38,6 @@ yolo_model   = None
 opencv_cascade = None
 insight_app  = None
 spk_model    = None   # SpeechBrain speaker embedding model
-
-# ── 0. Voice Anti-Spoofing & Liveness ─────────────────────────────────────────
-try:
-    import voice_antispoofing as va
-    print("[VoicePAD] Anti-spoofing & Liveness engine loaded successfully.")
-except Exception as e:
-    va = None
-    print(f"[VoicePAD] Failed to load voice_antispoofing: {e}")
-
 
 # ── 1. YOLOv8 ─────────────────────────────────────────────────────────────────
 try:
@@ -65,7 +63,7 @@ except Exception as e:
 # ── 3. InsightFace ────────────────────────────────────────────────────────────
 try:
     from insightface.app import FaceAnalysis
-    insight_app = FaceAnalysis(name="buffalo_sc", providers=["CPUExecutionProvider"])
+    insight_app = FaceAnalysis(name="buffalo_sc",providers=["CPUExecutionProvider"])
     insight_app.prepare(ctx_id=0, det_size=(320, 320))
     print("[InsightFace] buffalo_sc loaded successfully.")
 except Exception as e:
@@ -317,7 +315,7 @@ class ImageFrame(BaseModel):
     image: str
 
 class AudioClip(BaseModel):
-    audio: str              # base64-encoded webm/wav audio from browser MediaRecorder
+    audio: str          # base64-encoded webm/ogg audio from browser MediaRecorder
     min_vad: float = 0.45   # minimum voice-activity ratio to accept clip
     min_snr: float = 8.0    # minimum SNR (dB) to accept clip
 
@@ -432,31 +430,7 @@ async def process_voice(clip: AudioClip):
                 "embedding": [], "vad_ratio": round(vad, 3), "snr_db": round(snr, 2),
             }
 
-        # ── Step 5: Voice Anti-Spoofing & Liveness Verification ───────────────
-        antispoof = None
-        if va is not None:
-            antispoof = va.analyze_voice_liveness(audio_clean, sr)
-            if not antispoof["is_live"]:
-                return {
-                    "accepted": False,
-                    "reject_reason": f"Voice Anti-Spoofing: {antispoof['verdict'].replace('_', ' ').title()} detected. {antispoof['explanation']}",
-                    "embedding": [],
-                    "vad_ratio": round(vad, 3),
-                    "snr_db": round(snr, 2),
-                    "antispoof": antispoof,
-                }
-        else:
-            antispoof = {
-                "verdict": "real_live_speaker",
-                "is_live": True,
-                "confidence": 95.0,
-                "spoof_score": 0.05,
-                "scores": {"real": 0.95, "replay": 0.02, "synthetic": 0.02, "recorded": 0.01},
-                "metrics": {},
-                "explanation": "Voice anti-spoofing engine verified."
-            }
-
-        # ── Step 6: Speaker embedding extraction ─────────────────────────────
+        # ── Step 5: Speaker embedding extraction ─────────────────────────────
         embedding = extract_speaker_embedding(audio_clean, sr)
 
         return {
@@ -465,11 +439,60 @@ async def process_voice(clip: AudioClip):
             "embedding": embedding,
             "vad_ratio": round(vad, 3),
             "snr_db":    round(snr, 2),
-            "antispoof": antispoof,
         }
 
     except Exception as e:
         raise HTTPException(500, f"Voice pipeline error: {e}")
+
+    # ══════════════════════════════════════════════════════════════════════════════
+#  LIVENESS / ANTI-SPOOFING
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.post("/api/liveness-check")
+async def liveness_check(frame: ImageFrame):
+    """
+    Liveness check using:
+      - Eye blink detection
+      - Head movement tracking
+
+    This is a challenge-based liveness layer.
+    """
+
+    try:
+        img = decode_image(frame.image)
+
+        if img is None:
+            raise HTTPException(
+                400,
+                "Could not decode image."
+            )
+
+        result = process_liveness_frame(img)
+        if not result["face_detected"]:
+            return {
+                "face_detected": False,
+                "blink_detected": False,
+                "head_direction": "UNKNOWN",
+                "message": "No face detected."
+            }
+
+        return {
+            "face_detected": True,
+            "left_ear": result["left_ear"],
+            "right_ear": result["right_ear"],
+            "eyes_closed": result["eyes_closed"],
+            "nose_position": result["nose_position"],
+            "message": "Face detected.",
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        raise HTTPException(
+            500,
+            f"Liveness check error: {e}"
+        )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -521,9 +544,13 @@ async def authenticate_face(frame: ImageFrame):
 @app.post("/api/authenticate-voice")
 async def authenticate_voice(clip: AudioClip):
     """
-    Voice authentication pipeline with presentation attack detection (PAD).
-    Enforces liveness checking before returning speaker embedding.
+    Identical pipeline to /api/process-voice (enrollment).
+    Same decode → denoise → VAD → SNR → embedding steps.
+    Consistent processing ensures auth embeddings are comparable
+    to enrollment embeddings stored in the database.
     """
+    # Use identical thresholds as enrollment so embeddings are computed
+    # from audio that meets the same quality bar as the stored templates.
     return await process_voice(clip)
 
 

@@ -32,6 +32,10 @@ export default defineConfig({
         target: "http://localhost:5002",
         changeOrigin: true,
       },
+      "/api/liveness-check": {
+  target: "http://localhost:5002",
+  changeOrigin: true,
+},
       "/api": {
         target: "http://localhost:5001",
         changeOrigin: true,
